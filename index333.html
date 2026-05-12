@@ -1,0 +1,721 @@
+<!DOCTYPE html>
+<html lang="sr">
+<head>
+  <meta charset="UTF-8" />
+  <title>FP ECS 2D Platformer</title>
+  <style>
+    body {
+      margin: 0;
+      background: #1a8cc0;
+      color: #fff;
+      font-family: sans-serif;
+      text-align: center;
+    }
+    canvas {
+      background: black;
+      display: block;
+      margin: 0 auto;
+      border: 2px solid #444;
+      image-rendering: pixelated; /* pixel art look */
+    }
+  </style>
+</head>
+<body>
+  <h1>2D Platformer - ECS + FP</h1>
+  <hr>
+  <p>← → kretanje, Space skok, Z pucanje</p>
+  <canvas id="game" width="640" height="360"></canvas>
+
+  <script>
+    // =========================
+    // Sprite slike (pixel art)
+    // =========================
+    const spriteImages = {
+      player: new Image(),
+      enemy: new Image(),
+      platform: new Image()
+    };
+
+    // PODESI PUTANJE DO SVOJIH PNG FAJLOVA
+    spriteImages.player.src = "player.png";
+    spriteImages.enemy.src = "enemy.png";
+    spriteImages.platform.src = "platform.png";
+
+    const loadImage = img =>
+      new Promise(resolve => {
+        img.onload = resolve;
+      });
+
+    // =========================
+    // Funkcionalni helperi
+    // =========================
+    const compose = (...fns) => x => fns.reduceRight((v, f) => f(v), x);
+    const pipe = (...fns) => x => fns.reduce((v, f) => f(v), x);
+
+    // =========================
+    // ECS core
+    // =========================
+    const createEmptyWorld = () => ({
+      nextId: 1,
+      score: 0,
+      components: {
+        position: {},
+        velocity: {},
+        size: {},
+        color: {},
+        player: {},
+        platform: {},
+        enemy: {},
+        bullet: {},
+        sprite: {},
+        coin: {}         // NOVO: collectible
+      }
+    });
+
+    const addEntity = world => {
+      const id = world.nextId.toString();
+      return [id, { ...world, nextId: world.nextId + 1 }];
+    };
+
+    const addComponent = (world, type, id, data) => ({
+      ...world,
+      components: {
+        ...world.components,
+        [type]: {
+          ...world.components[type],
+          [id]: data
+        }
+      }
+    });
+
+    const removeEntities = (world, ids) => {
+      const idSet = new Set(ids);
+      const newComponents = {};
+
+      Object.entries(world.components).forEach(([type, comps]) => {
+        const filtered = {};
+        Object.entries(comps).forEach(([id, data]) => {
+          if (!idSet.has(id)) filtered[id] = data;
+        });
+        newComponents[type] = filtered;
+      });
+
+      return {
+        ...world,
+        components: newComponents
+      };
+    };
+
+    const entitiesWith = (world, ...types) => {
+      const sets = types.map(t => new Set(Object.keys(world.components[t])));
+      const [first, ...rest] = sets;
+      return [...first].filter(id => rest.every(s => s.has(id)));
+    };
+
+    // =========================
+    // Input stanje (izvan sveta)
+    // =========================
+    const inputState = {
+      keys: {}
+    };
+
+    window.addEventListener("keydown", e => {
+      inputState.keys[e.code] = true;
+    });
+    window.addEventListener("keyup", e => {
+      inputState.keys[e.code] = false;
+    });
+
+    // =========================
+    // SISTEM 1: Input sistem
+    // =========================
+    const inputSystem = (world, { dt, input }) => {
+      const speed = 150;
+      const newVelocity = { ...world.components.velocity };
+      const newPlayer = { ...world.components.player };
+
+      entitiesWith(world, "player", "velocity").forEach(id => {
+        const vel = newVelocity[id] || { vx: 0, vy: 0 };
+        const playerData = newPlayer[id] || { grounded: false, dir: 1, cooldown: 0 };
+
+        let vx = 0;
+        if (input.keys["ArrowLeft"]) vx -= speed;
+        if (input.keys["ArrowRight"]) vx += speed;
+
+        let vy = vel.vy;
+        let grounded = playerData.grounded;
+
+        if (input.keys["Space"] && grounded) {
+          vy = -350;
+          grounded = false;
+        }
+
+        let dir = playerData.dir;
+        if (vx > 0) dir = 1;
+        if (vx < 0) dir = -1;
+
+        newVelocity[id] = { vx, vy };
+        newPlayer[id] = {
+          ...playerData,
+          grounded,
+          dir
+        };
+      });
+
+      return {
+        ...world,
+        components: {
+          ...world.components,
+          velocity: newVelocity,
+          player: newPlayer
+        }
+      };
+    };
+
+    // =========================
+    // SISTEM 2: Shooting sistem
+    // =========================
+    const shootingSystem = (world, { dt, input }) => {
+      const newPlayer = { ...world.components.player };
+      const playerIds = entitiesWith(world, "player", "position", "size");
+
+      let newWorld = { ...world };
+
+      playerIds.forEach(id => {
+        const playerData = newPlayer[id] || { grounded: false, dir: 1, cooldown: 0 };
+        const pos = world.components.position[id];
+        const size = world.components.size[id];
+
+        const oldCooldown = playerData.cooldown || 0;
+        const cooldown = Math.max(0, oldCooldown - dt);
+        let updatedPlayer = { ...playerData, cooldown };
+
+        if (input.keys["KeyZ"] && cooldown <= 0) {
+          const dir = playerData.dir || 1;
+
+          const [bid, w1] = addEntity(newWorld);
+          newWorld = pipe(
+            w => addComponent(w, "position", bid, {
+              x: pos.x + size.w / 2,
+              y: pos.y + size.h / 2
+            }),
+            w => addComponent(w, "size", bid, { w: 8, h: 4 }),
+            w => addComponent(w, "velocity", bid, { vx: dir * 400, vy: 0 }),
+            w => addComponent(w, "color", bid, { fill: "#ffeb3b" }),
+            w => addComponent(w, "bullet", bid, true)
+          )(w1);
+
+          updatedPlayer = { ...updatedPlayer, cooldown: 0.3 };
+        }
+
+        newPlayer[id] = updatedPlayer;
+      });
+
+      newWorld = {
+        ...newWorld,
+        components: {
+          ...newWorld.components,
+          player: newPlayer
+        }
+      };
+
+      return newWorld;
+    };
+
+    // =========================
+    // SISTEM 3: Fizika
+    // =========================
+    const physicsSystem = (world, { dt }) => {
+      const g = 900;
+      const newVelocity = { ...world.components.velocity };
+      const newPosition = { ...world.components.position };
+
+      const ids = entitiesWith(world, "position", "velocity");
+
+      ids.forEach(id => {
+        const vel = newVelocity[id];
+        const pos = newPosition[id];
+        const isBullet = !!world.components.bullet[id];
+
+        const vy = isBullet ? vel.vy : vel.vy + g * dt;
+        const vx = vel.vx;
+
+        newVelocity[id] = { vx, vy };
+        newPosition[id] = {
+          x: pos.x + vx * dt,
+          y: pos.y + vy * dt
+        };
+      });
+
+      return {
+        ...world,
+        components: {
+          ...world.components,
+          velocity: newVelocity,
+          position: newPosition
+        }
+      };
+    };
+
+    // =========================
+    // SISTEM 4: Sudari sa platformama
+    // =========================
+    const collisionSystem = (world, { dt }) => {
+      const newPosition = { ...world.components.position };
+      const newVelocity = { ...world.components.velocity };
+      const newPlayer = { ...world.components.player };
+
+      const characterIds = entitiesWith(world, "position", "size", "velocity")
+        .filter(id => !world.components.bullet[id]); // metci ignorišu platforme
+
+      const platformIds = entitiesWith(world, "platform", "position", "size");
+
+      characterIds.forEach(id => {
+        let pPos = newPosition[id];
+        let pVel = newVelocity[id];
+        const pSize = world.components.size[id];
+
+        let grounded = world.components.player[id]
+          ? !!world.components.player[id].grounded
+          : false;
+
+        platformIds.forEach(fid => {
+          const fPos = world.components.position[fid];
+          const fSize = world.components.size[fid];
+
+          const overlapX =
+            pPos.x < fPos.x + fSize.w &&
+            pPos.x + pSize.w > fPos.x;
+          const overlapY =
+            pPos.y < fPos.y + fSize.h &&
+            pPos.y + pSize.h > fPos.y;
+
+          if (overlapX && overlapY) {
+            if (pVel.vy > 0 && pPos.y + pSize.h - fPos.y < 20) {
+              pPos = { ...pPos, y: fPos.y - pSize.h };
+              pVel = { ...pVel, vy: 0 };
+              grounded = true;
+            }
+          }
+        });
+
+        newPosition[id] = pPos;
+        newVelocity[id] = pVel;
+
+        if (world.components.player[id]) {
+          newPlayer[id] = { ...newPlayer[id], grounded };
+        }
+      });
+
+      return {
+        ...world,
+        components: {
+          ...world.components,
+          position: newPosition,
+          velocity: newVelocity,
+          player: newPlayer
+        }
+      };
+    };
+
+    // =========================
+    // SISTEM 5: Enemy AI (patrola)
+    // =========================
+    const enemyAISystem = (world, { dt }) => {
+      const newVelocity = { ...world.components.velocity };
+      const newEnemy = { ...world.components.enemy };
+
+      entitiesWith(world, "enemy", "velocity").forEach(id => {
+        const enemy = newEnemy[id];
+        const pos = world.components.position[id];
+
+        let dir = enemy.dir;
+        let vx = dir * enemy.speed;
+
+        if (pos.x < enemy.minX) {
+          dir = 1;
+          vx = enemy.speed;
+        } else if (pos.x > enemy.maxX) {
+          dir = -1;
+          vx = -enemy.speed;
+        }
+
+        newEnemy[id] = { ...enemy, dir };
+        newVelocity[id] = { ...newVelocity[id], vx };
+      });
+
+      return {
+        ...world,
+        components: {
+          ...world.components,
+          velocity: newVelocity,
+          enemy: newEnemy
+        }
+      };
+    };
+
+    // =========================
+    // Helper: spawn enemy (sa configom)
+    // =========================
+    const spawnEnemy = (world, cfg = {
+      x: 400, y: 180,
+      minX: 330, maxX: 500,
+      speed: 60
+    }) => {
+      const [id, w1] = addEntity(world);
+      return pipe(
+        w => addComponent(w, "position", id, { x: cfg.x, y: cfg.y }),
+        w => addComponent(w, "velocity", id, { vx: 0, vy: 0 }),
+        w => addComponent(w, "size", id, { w: 28, h: 28 }),
+        w => addComponent(w, "color", id, { fill: "#e91e63" }),      // fallback
+        w => addComponent(w, "sprite", id, { key: "enemy" }),
+        w => addComponent(w, "enemy", id, {
+          dir: -1,
+          speed: cfg.speed,
+          minX: cfg.minX,
+          maxX: cfg.maxX
+        })
+      )(w1);
+    };
+
+    // =========================
+    // SISTEM 6: Player vs Enemy
+    // =========================
+    const playerEnemySystem = (world, { dt }) => {
+      const playerIds = entitiesWith(world, "player", "position", "size");
+      const enemyIds = entitiesWith(world, "enemy", "position", "size");
+
+      if (playerIds.length === 0 || enemyIds.length === 0) return world;
+
+      const newPosition = { ...world.components.position };
+      const newVelocity = { ...world.components.velocity };
+      const newPlayer = { ...world.components.player };
+
+      const pId = playerIds[0];
+      const pPos = newPosition[pId];
+      const pSize = world.components.size[pId];
+
+      let dead = false;
+
+      enemyIds.forEach(eid => {
+        const ePos = world.components.position[eid];
+        const eSize = world.components.size[eid];
+
+        const overlapX =
+          pPos.x < ePos.x + eSize.w &&
+          pPos.x + pSize.w > ePos.x;
+        const overlapY =
+          pPos.y < ePos.y + eSize.h &&
+          pPos.y + pSize.h > ePos.y;
+
+        if (overlapX && overlapY) {
+          dead = true;
+        }
+      });
+
+      if (!dead) return world;
+
+      newPosition[pId] = { x: 50, y: 200 };
+      newVelocity[pId] = { vx: 0, vy: 0 };
+      newPlayer[pId] = { grounded: false, dir: 1, cooldown: 0 };
+
+      return {
+        ...world,
+        score: 0,
+        components: {
+          ...world.components,
+          position: newPosition,
+          velocity: newVelocity,
+          player: newPlayer
+        }
+      };
+    };
+
+    // =========================
+    // SISTEM 7: Metak pogadja neprijatelja
+    // =========================
+    const enemyHitSystem = (world, { dt }) => {
+      const bulletIds = entitiesWith(world, "bullet", "position", "size");
+      const enemyIds = entitiesWith(world, "enemy", "position", "size");
+
+      if (bulletIds.length === 0 || enemyIds.length === 0) return world;
+
+      const position = world.components.position;
+      const size = world.components.size;
+
+      const toRemove = new Set();
+      let killedEnemies = 0;
+
+      bulletIds.forEach(bid => {
+        const bPos = position[bid];
+        const bSize = size[bid];
+
+        enemyIds.forEach(eid => {
+          if (toRemove.has(eid)) return;
+          const ePos = position[eid];
+          const eSize = size[eid];
+
+          const overlapX =
+            bPos.x < ePos.x + eSize.w &&
+            bPos.x + bSize.w > ePos.x;
+          const overlapY =
+            bPos.y < ePos.y + eSize.h &&
+            bPos.y + bSize.h > ePos.y;
+
+          if (overlapX && overlapY) {
+            toRemove.add(bid);
+            toRemove.add(eid);
+            killedEnemies += 1;
+          }
+        });
+      });
+
+      if (toRemove.size === 0) return world;
+
+      let newWorld = removeEntities(world, [...toRemove]);
+
+      for (let i = 0; i < killedEnemies; i++) {
+        newWorld = spawnEnemy(newWorld); // default config
+      }
+
+      return {
+        ...newWorld,
+        score: newWorld.score + killedEnemies * 100
+      };
+    };
+
+    // =========================
+    // SISTEM 8: Čišćenje metaka
+    // =========================
+    const bulletCleanupSystem = (world, { canvas }) => {
+      const bulletIds = entitiesWith(world, "bullet", "position", "size");
+
+      const toRemove = bulletIds.filter(id => {
+        const pos = world.components.position[id];
+        const size = world.components.size[id];
+        return (
+          pos.x + size.w < 0 ||
+          pos.x > canvas.width ||
+          pos.y + size.h < 0 ||
+          pos.y > canvas.height
+        );
+      });
+
+      if (toRemove.length === 0) return world;
+
+      return removeEntities(world, toRemove);
+    };
+
+    // =========================
+    // SISTEM 9: Coin collect
+    // =========================
+    const coinCollectSystem = (world, { dt }) => {
+      const playerIds = entitiesWith(world, "player", "position", "size");
+      const coinIds = entitiesWith(world, "coin", "position", "size");
+
+      if (playerIds.length === 0 || coinIds.length === 0) return world;
+
+      const pId = playerIds[0];
+      const pPos = world.components.position[pId];
+      const pSize = world.components.size[pId];
+
+      const position = world.components.position;
+      const size = world.components.size;
+
+      const [collected, remaining] = coinIds.reduce(
+        ([col, rest], cid) => {
+          const cPos = position[cid];
+          const cSize = size[cid];
+
+          const overlapX =
+            pPos.x < cPos.x + cSize.w &&
+            pPos.x + pSize.w > cPos.x;
+          const overlapY =
+            pPos.y < cPos.y + cSize.h &&
+            pPos.y + pSize.h > cPos.y;
+
+          if (overlapX && overlapY) {
+            return [[...col, cid], rest];
+          } else {
+            return [col, [...rest, cid]];
+          }
+        },
+        [[], []]
+      );
+
+      if (collected.length === 0) return world;
+
+      const newWorld = removeEntities(world, collected);
+
+      return {
+        ...newWorld,
+        score: newWorld.score + collected.length * 10
+      };
+    };
+
+    // =========================
+    // SISTEM 10: Rendering
+    // =========================
+    const renderSystem = (world, { ctx, canvas }) => {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.imageSmoothingEnabled = false;
+
+      const ids = Object.keys(world.components.position);
+
+      ids.forEach(id => {
+        const pos = world.components.position[id];
+        const size = world.components.size[id];
+        if (!pos || !size) return;
+
+        const spriteComp = world.components.sprite[id];
+        const colorComp = world.components.color[id];
+
+        if (spriteComp && spriteImages[spriteComp.key]) {
+          const img = spriteImages[spriteComp.key];
+
+          // flip samo za player-a
+          if (world.components.player[id]) {
+            const playerData = world.components.player[id];
+            const dir = playerData.dir || 1;
+            if (dir === -1) {
+              ctx.save();
+              ctx.scale(-1, 1);
+              ctx.drawImage(img, -(pos.x + size.w), pos.y, size.w, size.h);
+              ctx.restore();
+              return;
+            }
+          }
+
+          ctx.drawImage(img, pos.x, pos.y, size.w, size.h);
+        } else if (colorComp) {
+          ctx.fillStyle = colorComp.fill;
+          ctx.fillRect(pos.x, pos.y, size.w, size.h);
+        }
+      });
+
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "16px sans-serif";
+      ctx.fillText("Score: " + world.score, 10, 20);
+
+      return world;
+    };
+
+    // =========================
+    // Kompozicija sistema
+    // =========================
+    const systems = [
+      inputSystem,
+      shootingSystem,
+      enemyAISystem,
+      physicsSystem,
+      collisionSystem,
+      playerEnemySystem,
+      enemyHitSystem,
+      bulletCleanupSystem,
+      coinCollectSystem,
+      renderSystem
+    ];
+
+    const step = (world, env) =>
+      systems.reduce((w, system) => system(w, env), world);
+
+    // =========================
+    // Inicijalizacija sveta
+    // =========================
+    const canvas = document.getElementById("game");
+    const ctx = canvas.getContext("2d");
+
+    let world = createEmptyWorld();
+
+    // --- Player ---
+    {
+      const [id, w1] = addEntity(world);
+      world = w1;
+
+      world = pipe(
+        w => addComponent(w, "position", id, { x: 50, y: 200 }),
+        w => addComponent(w, "velocity", id, { vx: 0, vy: 0 }),
+        w => addComponent(w, "size", id, { w: 32, h: 32 }),
+        w => addComponent(w, "color", id, { fill: "#4caf50" }), // fallback
+        w => addComponent(w, "sprite", id, { key: "player" }),
+        w => addComponent(w, "player", id, {
+          grounded: false,
+          dir: 1,
+          cooldown: 0
+        })
+      )(world);
+    }
+
+    // --- Platforme ---
+    const platformData = [
+      { x: 0,   y: 320, w: 640, h: 40 },
+      { x: 150, y: 260, w: 120, h: 20 },
+      { x: 330, y: 220, w: 120, h: 20 }
+    ];
+
+    world = platformData.reduce((w, p) => {
+      const [id, w1] = addEntity(w);
+      let w2 = w1;
+      w2 = addComponent(w2, "position", id, { x: p.x, y: p.y });
+      w2 = addComponent(w2, "size", id, { w: p.w, h: p.h });
+      w2 = addComponent(w2, "color", id, { fill: "#888" }); // fallback
+      w2 = addComponent(w2, "sprite", id, { key: "platform" });
+      w2 = addComponent(w2, "platform", id, true);
+      return w2;
+    }, world);
+
+    // --- Coin-ovi ---
+    const coinData = [
+      { x: 180, y: 220 },
+      { x: 360, y: 180 },
+      { x: 500, y: 200 }
+    ];
+
+    world = coinData.reduce((w, c) => {
+      const [id, w1] = addEntity(w);
+      let w2 = w1;
+      w2 = addComponent(w2, "position", id, { x: c.x, y: c.y });
+      w2 = addComponent(w2, "size", id, { w: 10, h: 10 });
+      w2 = addComponent(w2, "color", id, { fill: "#ffd700" });
+      w2 = addComponent(w2, "coin", id, true);
+      return w2;
+    }, world);
+
+    // --- Neprijatelji ---
+    const enemyConfigs = [
+      { x: 400, y: 180, minX: 330, maxX: 500, speed: 60 },
+      { x: 250, y: 200, minX: 200, maxX: 350, speed: 40 },
+      { x: 520, y: 280, minX: 480, maxX: 600, speed: 50 }
+    ];
+
+    world = enemyConfigs.reduce((w, cfg) => spawnEnemy(w, cfg), world);
+
+    // =========================
+    // Game loop
+    // =========================
+    let lastTime = 0;
+
+    const loop = time => {
+      const dt = (time - lastTime) / 1000 || 0;
+      lastTime = time;
+
+      world = step(world, {
+        dt,
+        input: inputState,
+        ctx,
+        canvas
+      });
+
+      requestAnimationFrame(loop);
+    };
+
+    Promise.all([
+      loadImage(spriteImages.player),
+      loadImage(spriteImages.enemy),
+      loadImage(spriteImages.platform)
+    ]).then(() => {
+      requestAnimationFrame(loop);
+    });
+  </script>
+</body>
+</html>
